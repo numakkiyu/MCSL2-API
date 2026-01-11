@@ -1,6 +1,0 @@
-pyproject.toml
-mcsl2_api.egg-info/PKG-INFO
-mcsl2_api.egg-info/SOURCES.txt
-mcsl2_api.egg-info/dependency_links.txt
-mcsl2_api.egg-info/requires.txt
-mcsl2_api.egg-info/top_level.txt
