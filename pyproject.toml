@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcsl2-api"
+version = "0.1.0"
+description = "Thread-safe, non-intrusive API layer for MCSL2 plugin developers"
+requires-python = ">=3.8"
+dependencies = ["PyQt5>=5.15"]
+
+[project.optional-dependencies]
+pydantic = ["pydantic>=1.10,<3"]
+http = ["requests>=2.0"]
+all = ["pydantic>=1.10,<3", "requests>=2.0"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["MCSL2_API*"]
