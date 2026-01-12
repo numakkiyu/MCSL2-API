@@ -1,197 +1,203 @@
-# MCSL2_API 调用文档
+# MCSL2_API 使用与开发手册
 
-本文按“我想做什么”来组织，覆盖 MCSL2_API 的主要调用方式、返回值形态与线程注意事项。
+面向 **MCSL2 插件开发者** 的使用文档与 API 参考，覆盖：
+* 如何通过 `MCSL2_API` 与 MCSL2 主程序通信（服务器/界面/下载/事件）
+* 如何规范地写插件（加载器约定、生命周期、线程模型）
+* 如何分发插件（终端用户零操作的 Vendor 模式）
+
+*   **PyPI 包名**：`mcsl2-api`
+*   **Python 导入名**：`MCSL2_API`
+*   **License**：MIT（见 [LICENSE](LICENSE)）
+
+---
 
 ## 目录
 
-- [快速索引](#快速索引)
-- [全局入口：API / Event / core](#全局入口api--event--core)
-- [服务器 API（API.server）](#服务器-apiapiserver)
-- [下载 API（API.download）](#下载-apiapidownload)
-- [事件 API（Event/core.events）](#事件-apieventcoreevents)
-- [插件标准入口（Plugin）](#插件标准入口plugin)
-- [异常隔离（guard）](#异常隔离guard)
-- [数据模型（models）](#数据模型models)
+1. [30 秒上手](#1-30-秒上手)
+2. [安装与分发](#2-安装与分发)
+3. [MCSL2 插件加载器约定](#3-mcsl2-插件加载器约定)
+4. [通信与线程模型](#4-通信与线程模型)
+5. [插件写法（模板）](#5-插件写法模板)
+6. [实战：可复制的完整例子](#6-实战可复制的完整例子)
+7. [API 参考（与当前代码一致）](#7-api-参考与当前代码一致)
+8. [故障排查](#8-故障排查)
 
-## 快速索引
+---
 
-常用 import：
+## 1. 30 秒上手
+
+一个“能跑起来”的插件至少要做三件事：
+1. 让 MCSL2 能 import 到你的插件模块（命名约定）
+2. 注入 `Window()`（让 API 拿到宿主上下文）
+3. 安装 Hook（把日志/退出转成事件）
+
+下面示例同时兼容“开发者有 pip 环境”和“用户无 pip 环境”（Vendor 模式）。把它放到 `Plugins/HelloPlugin/HelloPlugin.py` 里即可。
 
 ```python
-from MCSL2_API import API, Event, core
-from MCSL2_API import Plugin, PluginContext, PluginManifest
+from __future__ import annotations
+
+import os
+import sys
+
+_vendor_dir = os.path.join(os.path.dirname(__file__), "_vendor")
+if os.path.isdir(_vendor_dir) and _vendor_dir not in sys.path:
+    sys.path.insert(0, _vendor_dir)
+
+from MCSL2Lib.windowInterface import Window  # type: ignore
+from MCSL2_API import API, Event, Plugin, PluginContext, PluginManifest
+
+
+manifest = PluginManifest(
+    id="com.example.hello",
+    version="1.0.0",
+    dependencies=[],
+    permissions=[],
+    name="HelloPlugin",
+    description="演示：注入、Hook、事件、UI 注入、服务器命令",
+    authors=[],
+)
+
+
+class HelloPluginImpl(Plugin):
+    def on_load(self, context: PluginContext) -> None:
+        return
+
+    def on_enable(self, context: PluginContext) -> None:
+        context.core.inject_backend(Window())
+        context.core.events.install_hooks()
+
+        API.ui.add_button(
+            "pluginsInterface.pluginsVerticalLayout",
+            "发送 say Hello",
+            on_click=lambda: API.server.command("生存服", "say Hello from MCSL2_API"),
+            primary=True,
+        )
+
+        @Event.on(Event.Log)
+        def _on_log(e: Event.Log) -> None:
+            if e.server_name == "生存服" and "Done" in (e.content or ""):
+                API.interaction.notify("生存服启动完成", title="HelloPlugin", level="success")
+
+        context.interaction.notify("HelloPlugin 已启用", title="HelloPlugin", level="info")
+
+    def on_disable(self, context: PluginContext) -> None:
+        return
+
+
+HelloPlugin = HelloPluginImpl.export(manifest=manifest, plugin_name="HelloPlugin")
 ```
 
-常用动作：
+---
 
-- 注入 MCSL2 后端窗口：`core.inject_backend(Window())`
-- 安装服务器启动 Hook：`core.events.install_hooks()`
-- 启动服务器（推荐异步）：`API.server.start("生存服") -> Future[bool]`
-- 停止服务器（推荐异步）：`API.server.stop("生存服") -> Future[bool]`
-- 订阅服务器退出事件：`@Event.on(Event.ServerExit)`
+## 2. 安装与分发
 
-## 全局入口：API / Event / core
+### 2.1 开发者安装（有 Python 环境）
 
-这些符号都由 [`__init__.py`] 暴露。
+```bash
+pip install mcsl2-api
 
-### core（APICore 单例）
+# 可选依赖
+pip install "mcsl2-api[pydantic]"
+pip install "mcsl2-api[http]"
+pip install "mcsl2-api[all]"
+```
 
-`core` 是 [`APICore`] 的单例实例，提供：
+### 2.2 用户分发（Vendor 模式）
 
-- `core.inject_backend(backend_window) -> None`
-- `core.backend_window -> Any | None`
-- `core.interaction -> InteractionProvider`
-- `core.set_interaction(provider) -> None`
-- `core.threading -> ThreadManager`
-- `core.events -> EventBus`
-- `core.unsafe_access -> UnsafeAccess`
+终端用户通常只运行编译后的 `exe`，没有 pip 环境。开发者建议：
+1. 把 `MCSL2_API/` 整个目录复制到插件 `_vendor/` 下
+2. 在插件入口文件顶部注入 `_vendor` 到 `sys.path`（必须在 `import MCSL2_API` 之前）
 
-注入 backend 的典型用法（MCSL2 GUI 环境）：
+推荐目录结构：
+
+```text
+Plugins/
+└── MyPlugin/
+    ├── config.json
+    ├── MyPlugin.py
+    └── _vendor/
+        └── MCSL2_API/
+            ├── __init__.py
+            └── ...
+```
+
+入口注入模板：
 
 ```python
-from MCSL2Lib.windowInterface import Window
+import os
+import sys
+
+_vendor_dir = os.path.join(os.path.dirname(__file__), "_vendor")
+if _vendor_dir not in sys.path:
+    sys.path.insert(0, _vendor_dir)
+```
+
+---
+
+## 3. MCSL2 插件加载器约定
+
+MCSL2 的插件加载器是“约定优先”，核心要点：
+
+### 3.1 目录与入口名必须一致
+
+等价导入行为可以理解为：
+
+```python
+__import__(f"Plugins.{pluginName}.{pluginName}", fromlist=[pluginName])
+```
+
+所以你必须满足：
+
+```text
+Plugins/
+└── DemoPlugin/
+    ├── config.json
+    └── DemoPlugin.py
+```
+
+并且在 `DemoPlugin.py` 里导出一个与 `pluginName` 同名的全局变量。传统写法是：
+
+```python
+from Adapters.Plugin import Plugin
+
+DemoPlugin = Plugin()
+```
+
+现代写法使用 `Plugin.export(...)` 会自动把这个同名变量导出（见后文模板）。
+
+### 3.2 生命周期执行时机
+
+MCSL2 侧生命周期由 `Adapters.Plugin.Plugin` 承载，支持三段回调：
+* LOAD：首次导入时调用（若注册）
+* ENABLE：用户在插件页打开开关时调用（若注册）
+* DISABLE：用户关闭开关时调用（若注册）
+
+重要细节：
+* Python 模块会驻留在 `sys.modules`，禁用再启用不一定会重新 import
+* 不要把“必须执行的初始化”放在模块顶层；放在 ENABLE/LOAD
+
+---
+
+## 4. 通信与线程模型
+
+### 4.1 Window 注入（必须理解）
+
+绝大多数与宿主交互的能力都需要 MCSL2 主窗口 `Window()`：
+
+```python
+from MCSL2Lib.windowInterface import Window  # type: ignore
 from MCSL2_API import core
 
 core.inject_backend(Window())
 ```
 
-### API（Facade）
+注入后：
+* `core.backend_window` 可用
+* `API.interaction` 会尽量切换到 GUI 交互提供者（弹窗/通知）
 
-`API` 是一个组合入口，主要暴露：
+### 4.2 Hook 与事件桥接
 
-- `API.server: ServerAdapter`
-- `API.download: DownloadAdapter`
-- `API.interaction` / `API.backend_window` / `API.unsafe_access`
-
-### Event（事件命名空间）
-
-`Event` 是一个“命名空间对象”，提供：
-
-- `Event.Log`、`Event.ServerExit`、`Event.ServerStop`：事件类型
-- `Event.on(event_type, *, background=True)`：装饰器（不带 priority）
-- `Event.subscribe(fn=None, *, event_type=None, background=True, priority=0)`：装饰器（支持 priority 与自动推断 event_type）
-
-## 服务器 API（API.server）
-
-实现见 [`adapters/server.py`]。
-
-### 读取服务器列表
-
-```python
-servers = API.server.list()          # -> list[ServerInfo]
-server = API.server.get("生存服")    # -> ServerInfo | None
-```
-
-- 需要 MCSL2Lib 环境（内部使用 `MCSL2Lib.utils.readGlobalServerConfig`）
-- 返回的 `ServerInfo` 为标准模型（见 [数据模型](#数据模型models)）
-
-### 查询运行状态
-
-```python
-status = API.server.status("生存服")       # -> ServerStatus
-fut = API.server.status_async("生存服")    # -> Future[ServerStatus]
-```
-
-状态的判断依赖于已注册的 `bridge`（通常由启动 Hook 或 `start_server` 在启动成功后注册）。
-
-### 启动服务器
-
-推荐使用异步入口：
-
-```python
-fut = API.server.start("生存服")  # -> Future[bool]
-ok = fut.result()
-```
-
-同步版本（供内部或你自己放到后台线程时使用）：
-
-```python
-ok = API.server.start_server("生存服")  # -> bool
-```
-
-注意事项：
-
-- `start(...)` 是线程池异步调用，不会阻塞 UI
-- 真实启动过程会在 UI 线程执行（封送到 `run_on_ui_thread`）
-- 启动前会尝试 `core.events.install_hooks()`，并在成功拿到 bridge 后立即 `hook_bridge(...)`
-- 若返回 EULA 对象（未同意），会返回 False，并通过 `interaction.notify(...)` 提示
-
-### EULA
-
-```python
-ok = API.server.accept_eula("生存服")  # -> bool
-```
-
-### 停止/重启/发送命令
-
-这些都提供同步与异步入口：
-
-```python
-API.server.stop("生存服")                    # -> Future[bool]
-API.server.stop_server("生存服", force=False) # -> bool
-
-API.server.restart("生存服")                  # -> Future[bool]
-API.server.restart_server("生存服")           # -> bool
-
-ok = API.server.command_server("生存服", "say hello")  # -> bool
-```
-
-实现细节：
-
-- 实际调用 `bridge.stopServer()/haltServer()/restartServer()/sendCommand(...)` 并封送回 UI 线程
-- 如果找不到 bridge，会返回 False 并提示
-
-## 下载 API（API.download）
-
-实现见 [`adapters/download.py`]。
-
-```python
-task = API.download.start_task(
-    "https://example.com/file.zip",
-    file_path="C:/Downloads",
-    file_name="file.zip",
-    file_size=-1,
-)
-```
-
-- 该函数会尝试在 UI 线程创建 `MCSL2Lib.ProgramControllers.downloadController.DownloadTask`
-- 成功时返回 task 对象；失败返回 None，并通过 `interaction.notify(...)` 提示
-
-## 事件 API（Event/core.events）
-
-实现见 [`events/bus.py`]。
-
-### 订阅事件（简写：Event.on）
-
-```python
-from MCSL2_API import Event
-
-
-@Event.on(Event.Log)
-def on_log(e) -> None:
-    print(e.content)
-```
-
-`Event.on(...)` 默认 `background=True`，回调在后台线程执行。
-
-### 订阅事件（高级：Event.subscribe / core.events.on）
-
-如果你需要 **priority** 或 **自动推断 event_type**：
-
-```python
-from MCSL2_API import Event
-
-
-@Event.subscribe(priority=50)
-def on_exit(e: Event.ServerExit) -> None:
-    print(e.exit_code)
-```
-
-等价于直接用 `core.events.subscribe(...)` / `core.events.on(...)`。
-
-### 安装 Hook
-
-要把 MCSL2 的服务器启动结果（bridge）与信号转换为事件，需要安装 Hook：
+安装 Hook 后，MCSL2 的 `ServerLauncher.start()` 返回的 bridge 信号会被转换成标准事件：
 
 ```python
 from MCSL2_API import core
@@ -199,96 +205,301 @@ from MCSL2_API import core
 core.events.install_hooks()
 ```
 
-Hook 目标：`MCSL2Lib.ServerControllers.processCreator.ServerLauncher.start`。当 start 返回 bridge 时，会自动连接 `serverLogOutput/serverClosed` 并派发：
+事件来源：
+* `bridge.serverLogOutput` -> `Event.Log`
+* `bridge.serverClosed` -> `Event.ServerExit`
 
-- `LogEvent(server_name, content, ts)`
-- `ServerExitEvent(server_name, exit_code, ts)`
+### 4.3 线程模型（强制约束）
 
-### 可取消事件（约定）
+原则：
+* 不要阻塞 UI 线程
+* 触碰 Qt 对象必须回 UI 线程
 
-`EventBus.emit(...)` 会在每次回调前检查 `event.cancelled`。因此，只要你的事件对象具有该属性，就可用于“取消后续回调”的控制流：
+MCSL2_API 的默认行为：
+* `API.server.start/stop/restart/command`：对外返回 `Future`，内部自动封送 UI 线程处理 Qt 对象
+* `API.ui.*`：内部自动封送到 UI 线程执行
+* `Event.on(...)`：默认 `background=True`，回调会丢到线程池执行（避免阻塞 GUI）
 
-```python
-from MCSL2_API.events.bus import Cancellable
+如果你需要手动控制线程：
+* `core.threading.submit(fn, *args)`：提交到线程池，返回 `Future`
+* `MCSL2_API.utils.threading.run_on_ui_thread(fn, wait=...)`：封送到 UI 线程
 
+---
 
-class MyEvent(Cancellable):
-    pass
-```
+## 5. 插件写法（模板）
 
-## 插件标准入口（Plugin）
+### 5.1 现代插件（推荐）
 
-实现见 [`plugin.py`]。
-
-### 生命周期签名
-
-- `on_load(context: PluginContext) -> None`
-- `on_enable(context: PluginContext) -> None`
-- `on_disable(context: PluginContext) -> None`
-
-`PluginContext` 主要字段：
-
-- `context.core: APICore`
-- `context.manifest: PluginManifest`
-- `context.plugin_name: str`
-- `context.backend_window`（透传 core.backend_window）
-- `context.interaction`（透传 core.interaction）
-
-### 事件订阅（类内写法）
+现代写法的目标：让插件逻辑集中在一个类里，并自动完成：
+* 生命周期绑定到宿主 `Adapters.Plugin.Plugin()`
+* 异常隔离（宿主不中断）
+* 装饰器订阅事件（可选）
 
 ```python
-from MCSL2_API import Plugin, Event
+from __future__ import annotations
+
+from MCSL2_API import Plugin, PluginContext, PluginManifest
+
+manifest = PluginManifest(
+    id="com.example.myplugin",
+    version="1.0.0",
+    dependencies=[],
+    permissions=[],
+    name="示例插件",
+    description="现代插件模板",
+    authors=[],
+)
 
 
-class P(Plugin):
-    @Plugin.subscribe(priority=10)
-    def on_exit(self, e: Event.ServerExit) -> None:
-        ...
+class MyPluginImpl(Plugin):
+    def on_load(self, context: PluginContext) -> None:
+        return
+
+    def on_enable(self, context: PluginContext) -> None:
+        return
+
+    def on_disable(self, context: PluginContext) -> None:
+        return
+
+
+MyPlugin = MyPluginImpl.export(manifest=manifest, plugin_name="MyPlugin")
 ```
 
-在 `Plugin.export(...)` 执行的生命周期回调中，会扫描并自动注册这些订阅方法。
+### 5.2 原生插件（兼容模式）
 
-### 兼容旧加载器：export
+适合只想写少量脚本、或需要完全按宿主原生流程组织代码的情况：
 
 ```python
-PluginEntry = P.export(manifest=manifest)
+from Adapters.Plugin import Plugin
+from MCSL2Lib.windowInterface import Window  # type: ignore
+from MCSL2_API import API, core
+
+MyPlugin = Plugin()
+
+
+def enable() -> None:
+    core.inject_backend(Window())
+    core.events.install_hooks()
+    API.interaction.notify("插件已启用", title="MyPlugin", level="info")
+
+
+def disable() -> None:
+    return
+
+
+MyPlugin.register_enableFunc(enable)
+MyPlugin.register_disableFunc(disable)
 ```
 
-- 旧加载器只要能拿到 `PluginEntry` 即可调用
-- 导出的旧入口已做异常隔离（见 [异常隔离](#异常隔离guard)）
+---
 
-## 异常隔离（guard）
+## 6. 实战：可复制的完整例子
 
-实现见 [`safety.py`]。
+目标：演示“与宿主通信”的关键链路
+* 列出服务器 -> 启动 -> 监听日志 -> 注入 UI 按钮 -> 发送命令
 
 ```python
-from MCSL2_API.safety import guard
+from __future__ import annotations
+
+import os
+import sys
+
+_vendor_dir = os.path.join(os.path.dirname(__file__), "_vendor")
+if os.path.isdir(_vendor_dir) and _vendor_dir not in sys.path:
+    sys.path.insert(0, _vendor_dir)
+
+from MCSL2Lib.windowInterface import Window  # type: ignore
+from MCSL2_API import API, Event, Plugin, PluginContext, PluginManifest
 
 
-safe_fn = guard("my-plugin", fn)
-safe_fn()
+manifest = PluginManifest(
+    id="demo.api.full",
+    version="1.0.0",
+    dependencies=[],
+    permissions=[],
+    name="DemoFull",
+    description="演示：server/ui/event",
+    authors=[],
+)
+
+
+class DemoFullImpl(Plugin):
+    def on_load(self, context: PluginContext) -> None:
+        return
+
+    def on_enable(self, context: PluginContext) -> None:
+        context.core.inject_backend(Window())
+        context.core.events.install_hooks()
+
+        servers = API.server.list()
+        if not servers:
+            context.interaction.notify("未读取到服务器列表", title="DemoFull", level="warning")
+            return
+
+        target = servers[0].name
+        API.server.start(target)
+
+        API.ui.add_button(
+            "pluginsInterface.pluginsVerticalLayout",
+            f"对 {target} 发送 say",
+            on_click=lambda: API.server.command(target, "say Hello from DemoFull"),
+            primary=True,
+        )
+
+        @Event.on(Event.Log)
+        def _on_log(e: Event.Log) -> None:
+            if e.server_name != target:
+                return
+            if "Done" in (e.content or ""):
+                API.interaction.notify(f"{target} 启动完成", title="DemoFull", level="success")
+
+    def on_disable(self, context: PluginContext) -> None:
+        return
+
+
+DemoFull = DemoFullImpl.export(manifest=manifest, plugin_name="DemoFull")
 ```
 
-特点：
+---
 
-- 捕获所有异常，优先调用 `MCSL2Lib.utils.MCSL2Logger` 输出
-- 失败时退化为 stdout 打印
-- 返回值会变成 `Optional[T]`（异常时返回 None）
+## 7. API 参考（与当前代码一致）
 
-## 数据模型（models）
+本节以仓库当前实现为准（`MCSL2_API/__init__.py` 把能力组织成 `API`、`Event` 与 `core`）。
 
-实现见 [`models.py`]。
+### 7.1 顶层导入
 
-常用模型：
+```python
+from MCSL2_API import API, Event, core
+from MCSL2_API import Plugin, PluginContext, PluginManifest, Context
+from MCSL2_API.models import ServerInfo, ServerStatus, State, LogEvent, ServerExitEvent
+```
 
-- `ServerInfo`：服务器元数据（name/index/core_file_name/java_path/server_type/extra）
-- `ServerStatus`：运行状态（name/state/pid/exit_code/players）
-- `State`：`STOPPED/STARTING/RUNNING/CRASHED`
-- `LogEvent`：`server_name/content/ts`
-- `ServerExitEvent`：`server_name/exit_code/ts`
+### 7.2 API（Facade 命名空间）
 
-是否启用 Pydantic：
+* `API.server`: [ServerAdapter](MCSL2_API/adapters/server.py)
+* `API.ui`: [UIAdapter](MCSL2_API/adapters/ui.py)
+* `API.download`: [DownloadAdapter](MCSL2_API/adapters/download.py)
+* `API.interaction`: 交互提供者（注入 Window 后优先使用 GUI 交互）
+* `API.backend_window`: 当前注入的 Window（可能为 None）
+* `API.unsafe_access`: [UnsafeAccess](MCSL2_API/core.py)（进阶）
 
-- 若环境中安装了 `pydantic`，这些模型会以 `BaseModel` 形式提供更强校验
-- 否则自动降级为 `dataclass`（仍保持字段与语义一致）
+### 7.3 Event（事件命名空间）
 
+事件类型：
+* `Event.Log`：等价 `MCSL2_API.models.LogEvent`
+* `Event.ServerExit`：等价 `MCSL2_API.models.ServerExitEvent`
+* `Event.ServerStop`：当前版本等价 `ServerExitEvent`（占位别名）
+
+订阅：
+* `@Event.on(EventType, background=True)`：订阅指定事件类型
+* `Event.subscribe(fn=None, event_type=None, background=True, priority=0)`：可推断事件类型（需要参数类型注解）
+
+优先级：
+* `priority` 值越大越先执行
+
+### 7.4 core（APICore 单例与工具函数）
+
+`core` 是 `APICore()` 的单例实例。
+
+常用方法：
+* `core.inject_backend(backend_window)`
+* `core.set_interaction(provider)`
+* `core.get_bridge(server_name)`
+* `core.get_mcsl2_version() -> str`
+* `core.get_ai_analyzer_config() -> dict`
+* `core.get_ai_api_key(model: str | None = None) -> str`
+* `core.ai_analyze_plugin_error(error_text: str) -> str`
+* `core.load_nested_plugin(plugin_name, plugins_dir=r".\Plugins", package_prefix="Plugins", entry_attr_names=None) -> object | None`
+
+通过 `MCSL2_API` 顶层也暴露了别名函数：
+* `get_mcsl2_version`
+* `get_ai_analyzer_config`
+* `get_ai_api_key`
+* `ai_analyze_plugin_error`
+* `load_nested_plugin`
+
+### 7.5 API.server（ServerAdapter）
+
+读取与查找：
+* `API.server.list() -> list[ServerInfo]`
+* `API.server.get(server_name: str) -> ServerInfo | None`
+
+状态：
+* `API.server.status(server_name: str) -> ServerStatus`
+* `API.server.status_async(server_name: str) -> Future[ServerStatus]`
+
+控制（对外推荐异步版本）：
+* `API.server.start(server_name: str) -> Future[bool]`
+* `API.server.stop(server_name: str, force: bool = False) -> Future[bool]`
+* `API.server.restart(server_name: str) -> Future[bool]`
+* `API.server.command(server_name: str, command: str) -> Future[bool]`
+
+内部同步版本（通常不直接用）：
+* `API.server.start_server(server_name: str) -> bool`
+* `API.server.stop_server(server_name: str, force: bool = False) -> bool`
+* `API.server.restart_server(server_name: str) -> bool`
+* `API.server.command_server(server_name: str, command: str) -> bool`
+
+其他：
+* `API.server.accept_eula(server_name: str) -> bool`
+
+### 7.6 API.ui（UIAdapter）
+
+解析与注入：
+* `API.ui.resolve(path: str) -> object`
+* `API.ui.add_to_layout(layout_path: str, widget: QWidget) -> QWidget`
+
+常用控件：
+* `API.ui.add_button(layout_path: str, text: str, on_click=None, primary: bool = True) -> QWidget`
+* `API.ui.add_line_edit(layout_path: str, placeholder: str = "", text: str = "", on_change=None) -> QWidget`
+
+页面与窗口：
+* `API.ui.add_page(title: str, widget: QWidget, icon=None, position=None, object_name: str | None = None) -> QWidget`
+* `API.ui.open_window(widget: QWidget, title: str = "MCSL2_API", modal: bool = False, parent_path: str = "") -> QDialog`
+
+其他：
+* `API.ui.set_text(widget_path: str, text: str) -> None`
+
+### 7.7 API.download（DownloadAdapter）
+
+* `API.download.start_task(url: str, file_path: str | None = None, file_name: str | None = None, file_size: int = -1, extra_data: tuple | None = None) -> object`
+
+### 7.8 线程工具（utils.threading）
+
+* `MCSL2_API.utils.threading.is_ui_thread() -> bool`
+* `MCSL2_API.utils.threading.run_on_ui_thread(func, *args, wait: bool = True, **kwargs) -> T | Future[T]`
+* `core.threading.submit(fn, *args, **kwargs) -> Future`
+
+### 7.9 模型（models）
+
+* `ServerInfo(name, index, core_file_name=None, java_path=None, server_type=None, extra=dict)`
+* `ServerStatus(name, state: State, pid=None, exit_code=None, players=None)`
+* `State`: `STOPPED/STARTING/RUNNING/CRASHED`
+* `LogEvent(server_name, content, ts)`
+* `ServerExitEvent(server_name, exit_code, ts)`
+
+注：如果环境安装了 pydantic，这些模型为 `BaseModel`；否则为 `dataclass`。
+
+---
+
+## 8. 故障排查
+
+### 8.1 导入错误：`ModuleNotFoundError: No module named 'MCSL2_API'`
+
+* 终端用户无 pip 环境：请使用 Vendor 模式并确保入口文件顶部注入 `_vendor` 到 `sys.path`
+* 开发者环境：请确认安装的是 `mcsl2-api`（不是 `MCSL2_API`）
+
+### 8.2 收不到 `Event.Log` / `Event.ServerExit`
+
+* 确保已调用 `core.events.install_hooks()`
+* 如果服务器不是通过 MCSL2 的标准启动流程启动，可能无法拿到 bridge 信号
+
+### 8.3 UI 注入路径无效
+
+* 路径来自 `Window` 上的对象树（版本变动会影响命名）
+* 可用下面方式辅助探索：
+
+```python
+win = API.ui.resolve("")
+print([attr for attr in dir(win) if "Interface" in attr])
+```

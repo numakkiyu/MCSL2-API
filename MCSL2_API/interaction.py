@@ -79,6 +79,63 @@ class QtInteraction(InteractionProvider):
         run_on_ui_thread(_show, wait=False)
 
 
+class FluentInteraction(InteractionProvider):
+    def __init__(self, parent=None) -> None:
+        self._parent = parent
+
+    def notify(self, message: str, title: Optional[str] = None, level: str = "info") -> None:
+        def _show() -> None:
+            parent = self._parent
+            try:
+                from PyQt5.QtWidgets import QApplication
+
+                if parent is None:
+                    app = QApplication.instance()
+                    if app is not None:
+                        parent = app.activeWindow()
+            except Exception:
+                parent = self._parent
+
+            t = title or "MCSL2_API"
+            lvl = (level or "info").lower()
+            if lvl in ("warn", "warning"):
+                t = f"{t}（警告）"
+            elif lvl in ("error", "critical"):
+                t = f"{t}（错误）"
+
+            try:
+                from qfluentwidgets import MessageBox  # type: ignore
+
+                box = MessageBox(t, message, parent=parent)
+                box.yesButton.setText("了解")
+                try:
+                    box.cancelButton.setParent(None)  # type: ignore[attr-defined]
+                    box.cancelButton.deleteLater()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    box.exec()
+                except Exception:
+                    box.exec_()
+                return
+            except Exception:
+                pass
+
+            try:
+                from PyQt5.QtWidgets import QMessageBox
+
+                if lvl in ("warn", "warning"):
+                    QMessageBox.warning(parent, t, message)
+                elif lvl in ("error", "critical"):
+                    QMessageBox.critical(parent, t, message)
+                else:
+                    QMessageBox.information(parent, t, message)
+            except Exception:
+                return
+
+        run_on_ui_thread(_show, wait=False)
+
+
 class CompositeInteraction(InteractionProvider):
     def __init__(self, providers: Iterable[InteractionProvider]) -> None:
         self._providers = list(providers)

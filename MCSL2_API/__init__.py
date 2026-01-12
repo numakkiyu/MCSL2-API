@@ -21,6 +21,7 @@ from typing import Any
 
 from .adapters.download import DownloadAdapter
 from .adapters.server import ServerAdapter
+from .adapters.ui import UIAdapter
 from .core import APICore
 from .core import UnsafeAccess
 from .manifest import PluginManifest
@@ -35,6 +36,12 @@ from .plugin import PluginContext
 
 core = APICore()
 Context = PluginContext
+
+get_mcsl2_version = core.get_mcsl2_version
+get_ai_analyzer_config = core.get_ai_analyzer_config
+get_ai_api_key = core.get_ai_api_key
+ai_analyze_plugin_error = core.ai_analyze_plugin_error
+load_nested_plugin = core.load_nested_plugin
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,7 @@ class _APINamespace:
 
     server: ServerAdapter
     download: DownloadAdapter
+    ui: UIAdapter
 
     @property
     def interaction(self):
@@ -78,13 +86,18 @@ class _APINamespace:
 
 
 Event = _EventNamespace()
-API = _APINamespace(server=ServerAdapter(core), download=DownloadAdapter(core))
+API = _APINamespace(
+    server=ServerAdapter(core),
+    download=DownloadAdapter(core),
+    ui=UIAdapter(core),
+)
 
 __all__ = [
     "API",
     "Event",
     "APICore",
     "UnsafeAccess",
+    "UIAdapter",
     "Plugin",
     "PluginManifest",
     "PluginContext",
@@ -95,4 +108,9 @@ __all__ = [
     "ServerStatus",
     "State",
     "core",
+    "get_mcsl2_version",
+    "get_ai_analyzer_config",
+    "get_ai_api_key",
+    "ai_analyze_plugin_error",
+    "load_nested_plugin",
 ]

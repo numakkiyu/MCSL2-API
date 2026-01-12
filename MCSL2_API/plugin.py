@@ -148,9 +148,9 @@ class Plugin(ABC):
         def _disable() -> None:
             _call_lifecycle(instance.on_disable, context)
 
-        legacy.register_loadFunc(guard(label, _load))
-        legacy.register_enableFunc(guard(label, _enable))
-        legacy.register_disableFunc(guard(label, _disable))
+        legacy.register_loadFunc(guard(label, _load, interaction=context.core.interaction))
+        legacy.register_enableFunc(guard(label, _enable, interaction=context.core.interaction))
+        legacy.register_disableFunc(guard(label, _disable, interaction=context.core.interaction))
 
         if inferred_name:
             module_globals[inferred_name] = legacy
